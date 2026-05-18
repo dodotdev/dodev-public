@@ -13,6 +13,15 @@ on:
   workflow_run:
     workflows: ["Release"]
     types: [completed]
+  # Manual trigger so we can backfill an existing release into R2
+  # without having to retag (or bump the version) just to populate
+  # the bucket.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to mirror (e.g. dodev-cli-v0.1.0)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -26,14 +35,19 @@ jobs:
         id: tag
         env:
           # Never interpolate ${{ ... }} directly into a `run:` block —
-          # branch/tag names are user-controllable. Pull into env first.
+          # branch/tag/dispatch inputs are user-controllable. Pull into
+          # env first.
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ -z "$HEAD_BRANCH" ] || [ "$HEAD_BRANCH" = "main" ]; then
-            echo "Not a tag push (head_branch=$HEAD_BRANCH) — skipping."
+          # workflow_dispatch inputs win over workflow_run lookups.
+          INPUT_TAG="${DISPATCH_TAG:-$HEAD_BRANCH}"
+          if [ -z "$INPUT_TAG" ] || [ "$INPUT_TAG" = "main" ]; then
+            echo "Not a tag (got '$INPUT_TAG') — skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          HEAD_BRANCH="$INPUT_TAG"
           case "$HEAD_BRANCH" in
             dodev-cli-v*)
               # Strip the cargo-dist tag namespace prefix. dodev-cli-v0.1.0 → 0.1.0

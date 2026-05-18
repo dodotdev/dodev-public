@@ -165,9 +165,13 @@ async fn cmd_update() -> Result<(), String> {
 
 /// Start a tunnel connection.
 ///
-/// Subdomain selection: --subdomain flag wins; otherwise defaults to "lab"
-/// (the v0/v1 dev subdomain). Auto-discovery of the user's assigned random
-/// subdomains via the /cli/validate-session response is a TODO.
+/// Subdomain selection:
+/// 1. --ws-url override (advanced/non-prod) wins absolutely.
+/// 2. Else, hit /api/cli/me to find out which subdomains this user owns.
+/// 3. If --subdomain was passed and the user owns it → use it.
+/// 4. If --subdomain was passed but not owned → fail fast with a friendly
+///    message listing what they DO own.
+/// 5. Else (no flag) → use the user's first assigned random subdomain.
 async fn cmd_start(
     ws_url_override: Option<String>,
     port: u16,
@@ -175,21 +179,108 @@ async fn cmd_start(
     host: String,
 ) -> Result<(), String> {
     let token = auth::get_auth_token().map_err(|e| e.to_string())?;
-    let subdomain = subdomain.unwrap_or_else(|| "lab".to_string());
-    let ws_url = ws_url_override
-        .unwrap_or_else(|| format!("wss://{}.local.dev/_dodev/connect", subdomain));
 
-    let config = tunnel::TunnelConfig {
-        ws_url,
-        token,
-        subdomain,
-        local_host: host,
-        local_port: port,
+    // --ws-url is for power users hitting a non-prod env. It bypasses the
+    // me lookup entirely — they specified an exact URL, we honour it.
+    if let Some(ws_url) = ws_url_override {
+        let chosen = subdomain.unwrap_or_else(|| "lab".to_string());
+        return tunnel::run_tunnel(tunnel::TunnelConfig {
+            ws_url,
+            token,
+            subdomain: chosen,
+            local_host: host,
+            local_port: port,
+        })
+        .await
+        .map_err(|e| e.to_string());
+    }
+
+    let me = fetch_me(&token).await.map_err(|e| e.to_string())?;
+    let owned: Vec<String> = me
+        .assigned_subdomains
+        .iter()
+        .chain(me.reserved_subdomains.iter())
+        .cloned()
+        .collect();
+
+    let chosen = match subdomain {
+        Some(requested) => {
+            if owned.iter().any(|s| s.eq_ignore_ascii_case(&requested)) {
+                requested
+            } else {
+                return Err(format!(
+                    "You don't own '{}.local.dev'. Subdomains you can use:\n{}",
+                    requested,
+                    if owned.is_empty() {
+                        "  (none yet — try `dodev login` then re-run)".to_string()
+                    } else {
+                        owned
+                            .iter()
+                            .map(|s| format!("  - {}.local.dev", s))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
+                ));
+            }
+        }
+        None => match owned.first() {
+            Some(s) => s.clone(),
+            None => {
+                return Err(
+                    "No subdomains assigned to your account yet. Try `dodev login` to refresh, or contact support@do.dev."
+                        .to_string(),
+                );
+            }
+        },
     };
 
-    tunnel::run_tunnel(config)
+    println!("  Using subdomain: {}.local.dev", chosen);
+
+    let ws_url = format!("wss://{}.local.dev/_dodev/connect", chosen);
+    tunnel::run_tunnel(tunnel::TunnelConfig {
+        ws_url,
+        token,
+        subdomain: chosen,
+        local_host: host,
+        local_port: port,
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Deserialize)]
+struct MeResponse {
+    #[allow(dead_code)]
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default, rename = "assignedSubdomains")]
+    assigned_subdomains: Vec<String>,
+    #[serde(default, rename = "reservedSubdomains")]
+    reserved_subdomains: Vec<String>,
+}
+
+async fn fetch_me(token: &str) -> Result<MeResponse, String> {
+    let url = format!("{}/api/cli/me", AUTH_BASE_URL);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token)
+        .send()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("Failed to reach {}: {}", url, e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Account lookup failed ({}): {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        ));
+    }
+
+    resp.json::<MeResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse account response: {}", e))
 }
 
 // ---------------------------------------------------------------

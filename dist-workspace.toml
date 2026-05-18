@@ -1,0 +1,20 @@
+[workspace]
+# The Rust workspace lives in dodev-cli/. Anything else public (docs,
+# scripts, future binaries) gets its own sibling directory.
+members = ["cargo:dodev-cli"]
+
+# Config for 'dist'
+[dist]
+cargo-dist-version = "0.31.0"
+ci = "github"
+# - shell: install.sh for macOS/Linux (curl … | sh)
+# - powershell: install.ps1 for Windows
+# Homebrew tap is a post-launch follow-up; requires a separate tap repo.
+installers = ["shell", "powershell"]
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+hosting = "github"
+# Bake axoupdater into the binary so `dodev update` self-updates.
+install-updater = true
+# Only tags shaped `dodev-cli-vX.Y.Z` trigger the workflow. Leaves the
+# repo free to use other tag schemes for other artifacts later.
+tag-namespace = "dodev-cli"

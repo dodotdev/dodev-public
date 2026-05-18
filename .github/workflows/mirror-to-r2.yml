@@ -28,7 +28,10 @@ permissions:
 
 jobs:
   mirror:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Run if either:
+    # - this was a workflow_run trigger AND the upstream Release succeeded
+    # - this was a manual workflow_dispatch
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-22.04
     steps:
       - name: Identify the tag

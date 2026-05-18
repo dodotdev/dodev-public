@@ -1,3 +1,4 @@
+mod active;
 mod auth;
 mod config;
 mod display;
@@ -205,9 +206,7 @@ async fn cmd_start(
 
     let chosen = match subdomain {
         Some(requested) => {
-            if owned.iter().any(|s| s.eq_ignore_ascii_case(&requested)) {
-                requested
-            } else {
+            if !owned.iter().any(|s| s.eq_ignore_ascii_case(&requested)) {
                 return Err(format!(
                     "You don't own '{}.local.dev'. Subdomains you can use:\n{}",
                     requested,
@@ -222,16 +221,54 @@ async fn cmd_start(
                     }
                 ));
             }
-        }
-        None => match owned.first() {
-            Some(s) => s.clone(),
-            None => {
-                return Err(
-                    "No subdomains assigned to your account yet. Try `dodev login` to refresh, or contact support@do.dev."
-                        .to_string(),
-                );
+            if active::is_in_use(&requested) {
+                return Err(format!(
+                    "'{}.local.dev' is already in use by another dodev tunnel on this machine. Stop that one (Ctrl+C) or pick a different subdomain with -s.",
+                    requested
+                ));
             }
-        },
+            requested
+        }
+        None => {
+            // Auto-pick: first owned subdomain not currently in use.
+            // Reserved names (claimed namespaces) come AFTER assigned ones
+            // because they're typically more memorable — we want random
+            // subdomains used for ephemeral tunnels and reserved ones
+            // saved for user-facing work.
+            let free: Vec<&String> = owned.iter().filter(|s| !active::is_in_use(s)).collect();
+            match free.first() {
+                Some(s) => (*s).clone(),
+                None if owned.is_empty() => {
+                    return Err(
+                        "No subdomains assigned to your account yet. Try `dodev login` to refresh, or contact support@do.dev.".to_string()
+                    );
+                }
+                None => {
+                    return Err(format!(
+                        "All {} of your subdomains are in use by other dodev tunnels on this machine:\n{}\n\nStop one with Ctrl+C, or upgrade for more concurrent tunnels: https://local.dev/pricing",
+                        owned.len(),
+                        owned
+                            .iter()
+                            .map(|s| format!("  - {}.local.dev", s))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ));
+                }
+            }
+        }
+    };
+
+    // Acquire the per-subdomain lockfile so a second `dodev local http` in
+    // another terminal will skip this one. Held for the lifetime of the
+    // tunnel; cleaned up via Drop on graceful exit. If acquire fails
+    // (filesystem error), log a warning but proceed — the tunnel still
+    // works, we just can't track it.
+    let _lock = match active::acquire(&chosen) {
+        Ok(g) => Some(g),
+        Err(e) => {
+            tracing::warn!("Couldn't write tunnel lock for '{}': {}", chosen, e);
+            None
+        }
     };
 
     println!("  Using subdomain: {}.local.dev", chosen);

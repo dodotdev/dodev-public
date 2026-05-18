@@ -1,6 +1,6 @@
 [package]
 name = "dodev-cli"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "do.dev CLI — local.dev tunnels (real .dev hostname, real HTTPS, OAuth-ready)"
 repository = "https://github.com/dodotdev/dodev-public"
@@ -41,3 +41,7 @@ rustls = { version = "0.23", features = ["ring"] }
 # from source won't have a receipt — `dodev update` will print a friendly
 # error pointing them at install.sh.
 axoupdater = { version = "0.9", default-features = false, features = ["github_releases", "tokio"] }
+# Used by src/active.rs for libc::kill(pid, 0) — the canonical "is this
+# process alive?" probe. Lets us prune stale tunnel lockfiles from
+# CLIs that crashed without cleanup.
+libc = "0.2"

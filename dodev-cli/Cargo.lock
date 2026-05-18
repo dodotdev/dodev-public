@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "dodev-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "axoupdater",
  "base64",
@@ -388,6 +388,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "indicatif",
+ "libc",
  "reqwest",
  "rustls",
  "serde",

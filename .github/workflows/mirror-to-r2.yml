@@ -1,0 +1,90 @@
+name: Mirror release to R2
+
+# Runs after the cargo-dist Release workflow finishes. Pulls every
+# release asset from GitHub and uploads it to the dodev-releases R2
+# bucket under two prefixes:
+#   dodev-cli/v<VERSION>/   (immutable, version-pinned)
+#   dodev-cli/latest/       (overwritten each release)
+#
+# The bucket is fronted by https://dl.local.dev (custom domain on R2),
+# so end-user install URLs say local.dev and never touch GitHub.
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Identify the tag
+        id: tag
+        env:
+          # Never interpolate ${{ ... }} directly into a `run:` block —
+          # branch/tag names are user-controllable. Pull into env first.
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [ -z "$HEAD_BRANCH" ] || [ "$HEAD_BRANCH" = "main" ]; then
+            echo "Not a tag push (head_branch=$HEAD_BRANCH) — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$HEAD_BRANCH" in
+            dodev-cli-v*)
+              # Strip the cargo-dist tag namespace prefix. dodev-cli-v0.1.0 → 0.1.0
+              VERSION="${HEAD_BRANCH#dodev-cli-v}"
+              # Reject anything that isn't a plain semver-ish string.
+              case "$VERSION" in
+                *[!0-9.a-zA-Z\-]*)
+                  echo "Refusing to use unsafe version string: $VERSION"
+                  exit 1
+                  ;;
+              esac
+              echo "tag=$HEAD_BRANCH" >> "$GITHUB_OUTPUT"
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "head_branch '$HEAD_BRANCH' doesn't match dodev-cli-v* — skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Download release assets
+        if: steps.tag.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p assets
+          gh release download "$TAG" --repo "$REPO" --dir assets --pattern '*'
+          echo "Downloaded:"
+          ls -lh assets/
+
+      - name: Upload to R2 (version-pinned)
+        if: steps.tag.outputs.skip != 'true'
+        uses: shallwefootball/s3-upload-action@v1.3.3
+        with:
+          aws_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws_bucket: ${{ secrets.R2_BUCKET }}
+          source_dir: assets
+          destination_dir: dodev-cli/v${{ steps.tag.outputs.version }}
+          endpoint: ${{ secrets.R2_ENDPOINT }}
+
+      - name: Upload to R2 (latest alias)
+        if: steps.tag.outputs.skip != 'true'
+        uses: shallwefootball/s3-upload-action@v1.3.3
+        with:
+          aws_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws_bucket: ${{ secrets.R2_BUCKET }}
+          source_dir: assets
+          destination_dir: dodev-cli/latest
+          endpoint: ${{ secrets.R2_ENDPOINT }}

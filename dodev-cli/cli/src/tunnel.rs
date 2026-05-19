@@ -40,6 +40,9 @@ pub enum TunnelError {
     #[error("Authentication failed: {0}")]
     AuthFailed(String),
 
+    #[error("Quota exceeded: {0}")]
+    QuotaExceeded(String),
+
     #[error("WebSocket error: {0}")]
     WebSocket(String),
 
@@ -85,6 +88,10 @@ pub async fn run_tunnel(config: TunnelConfig) -> Result<(), TunnelError> {
             }
             Err(TunnelError::AuthFailed(reason)) => {
                 return Err(TunnelError::AuthFailed(reason));
+            }
+            Err(TunnelError::QuotaExceeded(reason)) => {
+                // Quotas don't resolve on their own — bail instead of looping.
+                return Err(TunnelError::QuotaExceeded(reason));
             }
             Err(e) => {
                 reconnect_attempt += 1;
@@ -266,6 +273,24 @@ fn classify_connect_error(err: tokio_tungstenite::tungstenite::Error) -> TunnelE
                 .map(|b| String::from_utf8_lossy(b).trim().to_string())
                 .unwrap_or_else(|| "forbidden".to_string());
             return TunnelError::AuthFailed(format!("forbidden: {}", body));
+        }
+        if resp.status() == 429 {
+            let body = resp
+                .body()
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).trim().to_string())
+                .unwrap_or_else(|| "quota exceeded".to_string());
+            // Worker prefixes the body with "quota exceeded:" — strip
+            // before re-wrapping with our friendlier framing.
+            let detail = body
+                .strip_prefix("quota exceeded:")
+                .unwrap_or(&body)
+                .trim()
+                .to_string();
+            return TunnelError::QuotaExceeded(format!(
+                "{}. Stop another tunnel with Ctrl+C, or upgrade at https://local.dev/pricing",
+                if detail.is_empty() { "limit reached" } else { &detail }
+            ));
         }
     }
     TunnelError::WebSocket(err.to_string())

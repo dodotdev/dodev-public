@@ -45,6 +45,7 @@ pub async fn proxy_request(
 
     let mut req_builder = client.request(method.clone(), &local_url);
 
+    let mut saw_accept_encoding = false;
     for (name, value) in &request.headers {
         // Drop hop-by-hop / connection-specific headers. reqwest manages
         // Host based on the URL; content-length must be derived from the
@@ -66,7 +67,22 @@ pub async fn proxy_request(
         ) {
             continue;
         }
+        // Rewrite Accept-Encoding to only what our Worker can decompress
+        // (gzip/deflate). DecompressionStream in CF Workers doesn't
+        // support brotli, so requesting "br" from upstream would mean
+        // forwarding br bytes that CF strips the header from, producing
+        // garbage in the browser.
+        if lower == "accept-encoding" {
+            req_builder = req_builder.header("accept-encoding", "gzip, deflate");
+            saw_accept_encoding = true;
+            continue;
+        }
         req_builder = req_builder.header(name.as_str(), value.as_str());
+    }
+    if !saw_accept_encoding {
+        // If the browser didn't ask for compression, ask anyway — keeps
+        // the WS hop small. Worker decompresses before browser sees it.
+        req_builder = req_builder.header("accept-encoding", "gzip, deflate");
     }
 
     // GET and HEAD must not carry a body even if one was sent.

@@ -96,13 +96,7 @@ pub async fn proxy_request(
         }
         Err(e) if e.is_connect() => {
             tracing::debug!("Connection refused to {}:{}", local_host, local_port);
-            error_response(
-                502,
-                &format!(
-                    "Local server not running on port {}. Start your server and try again.",
-                    local_port
-                ),
-            )
+            local_server_down_response(local_port)
         }
         Err(e) if e.is_timeout() => {
             tracing::debug!("Timeout connecting to {}:{}", local_host, local_port);
@@ -119,4 +113,98 @@ fn error_response(status: u16, message: &str) -> LocalResponse {
     let mut headers = HashMap::new();
     headers.insert("content-type".to_string(), "text/plain; charset=utf-8".to_string());
     LocalResponse { status, headers, body: message.as_bytes().to_vec() }
+}
+
+/// HTML page served when the tunnel is healthy but the user's local
+/// server isn't responding (connection refused). Most common situation:
+/// they killed `pnpm dev` and re-loaded the URL, or pointed the tunnel
+/// at the wrong port. Plain text is confusing in a browser — explain
+/// what happened and link back to local.dev for context.
+fn local_server_down_response(port: u16) -> LocalResponse {
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>local.dev — local server is down</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    max-width: 560px; margin: 6rem auto; padding: 0 1.5rem;
+    line-height: 1.55; color: #1a1a1a; background: #fafafa;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    body {{ color: #e5e7eb; background: #0a0a0a; }}
+    code, pre {{ background: #1a1a1a; color: #d1fae5; }}
+    .card {{ background: #111; border-color: #1f2937; }}
+  }}
+  .logo {{
+    display: inline-flex; align-items: center; gap: .5rem;
+    color: #047857; font-weight: 600; text-decoration: none;
+  }}
+  .logo-mark {{
+    width: 1.75rem; height: 1.75rem; border-radius: .375rem;
+    background: #047857; display: inline-flex;
+    align-items: center; justify-content: center;
+    color: white; font-size: .85rem; font-family: "SF Mono", Menlo, monospace;
+  }}
+  h1 {{ margin-top: 1.5rem; font-size: 1.5rem; }}
+  .card {{
+    margin-top: 1.5rem; padding: 1.25rem 1.5rem;
+    border: 1px solid #e5e7eb; background: #fff; border-radius: .5rem;
+  }}
+  code, pre {{
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    background: #f3f4f6; padding: .15rem .4rem; border-radius: .25rem;
+    font-size: .9em;
+  }}
+  pre {{ padding: .75rem 1rem; overflow-x: auto; }}
+  a {{ color: #047857; }}
+  .muted {{ color: #6b7280; font-size: .9rem; margin-top: 2rem; }}
+</style>
+</head>
+<body>
+<a href="https://local.dev" class="logo">
+  <span class="logo-mark">›_</span><span>local.dev</span>
+</a>
+
+<h1>Your local server is down.</h1>
+<p>
+  The tunnel is up — but nothing is listening on
+  <code>localhost:{port}</code>. Start your dev server, then refresh
+  this page.
+</p>
+
+<div class="card">
+  <p style="margin: 0 0 .5rem;"><strong>Common fixes</strong></p>
+  <ul style="margin: 0; padding-left: 1.25rem;">
+    <li>Run <code>pnpm dev</code> (or equivalent) in another terminal</li>
+    <li>Make sure it's bound to port <code>{port}</code></li>
+    <li>Wrong port? Restart your tunnel:
+      <pre>dodev local http &lt;your-port&gt;</pre></li>
+  </ul>
+</div>
+
+<p class="muted">
+  Powered by <a href="https://local.dev">local.dev</a> — OAuth-ready
+  HTTPS tunnels with real <code>.dev</code> hostnames.
+  <a href="https://local.dev">What is local.dev? →</a>
+</p>
+</body>
+</html>
+"#,
+        port = port,
+    );
+
+    let mut headers = HashMap::new();
+    headers.insert("content-type".to_string(), "text/html; charset=utf-8".to_string());
+    headers.insert("cache-control".to_string(), "no-store".to_string());
+    LocalResponse {
+        status: 502,
+        headers,
+        body: html.into_bytes(),
+    }
 }

@@ -218,6 +218,21 @@ async fn cmd_start(
 
     let chosen = match subdomain {
         Some(requested) => {
+            // Be forgiving about what users type. Common copy-paste patterns:
+            //   -s dev                   → "dev"
+            //   -s dev.local.dev         → strip → "dev"        (flat)
+            //   -s talk.dev              → "talk.dev"           (nested)
+            //   -s talk.dev.local.dev    → strip → "talk.dev"   (nested)
+            //   -s local.dev             → "local.dev" (leaf=local, ns=dev)
+            //   -s local.dev.local.dev   → strip → "local.dev"
+            // Lowercase first since DNS is case-insensitive but our owned
+            // list and the eq_ignore_ascii_case checks expect normalized.
+            let requested = requested.to_lowercase();
+            let requested = requested
+                .strip_suffix(".local.dev")
+                .map(|s| s.to_string())
+                .unwrap_or(requested);
+
             // Accept either a flat owned subdomain ("dev") or a single-level
             // nested form under an owned namespace ("talk.dev" or "pbx.dev").
             // The Worker keys each nested hostname to its own Durable Object,

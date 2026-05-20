@@ -68,6 +68,21 @@ enum Envelope {
         headers: HashMap<String, String>,
         body: Option<String>, // base64
     },
+    // Server-initiated heartbeat. Keeps the WS warm AND lets the server
+    // confirm liveness via the ack we send back. Without this, a
+    // silently-dead WS (NAT timeout, ISP cleanup) goes undetected until
+    // the next browser request times out. See backends/workers-local
+    // tunnel-do.ts WS_IDLE_TIMEOUT_MS for the server side.
+    Heartbeat {
+        #[serde(default)]
+        ts: u64,
+    },
+    // Acknowledgement we send back on receiving a Heartbeat.
+    #[serde(rename = "heartbeat-ack")]
+    HeartbeatAck {
+        #[serde(default)]
+        ts: u64,
+    },
 }
 
 pub async fn run_tunnel(config: TunnelConfig) -> Result<(), TunnelError> {
@@ -183,6 +198,22 @@ async fn connect_and_run(
                     }
                     Envelope::Response { .. } => {
                         tracing::debug!("ignoring response envelope from server");
+                        continue;
+                    }
+                    Envelope::Heartbeat { ts } => {
+                        // Send ack back. The act of doing so refreshes
+                        // the server's lastSeenAt for this WS and keeps
+                        // it from getting pruned as idle.
+                        let ack = Envelope::HeartbeatAck { ts };
+                        if let Ok(payload) = serde_json::to_string(&ack) {
+                            let _ = tx.send(Message::Text(payload.into())).await;
+                        }
+                        continue;
+                    }
+                    Envelope::HeartbeatAck { .. } => {
+                        // We don't initiate heartbeats client-side, so
+                        // this shouldn't fire — but ignore cleanly if
+                        // it does.
                         continue;
                     }
                 };

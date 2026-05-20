@@ -76,10 +76,15 @@ enum LocalCommands {
 }
 
 fn init_tracing(verbose: bool) {
+    // Default level is WARN so axoupdater's "INFO exec env …" and other
+    // dependency chatter doesn't clutter user output. The CLI's own
+    // human-facing status (e.g. `dodev update` progress) uses
+    // `println!`/`display::*`, not tracing, so those still show up.
+    // `--verbose` opens it up to DEBUG for actual diagnostics.
     let level = if verbose {
         tracing::Level::DEBUG
     } else {
-        tracing::Level::INFO
+        tracing::Level::WARN
     };
     tracing_subscriber::fmt()
         .with_max_level(level)
@@ -145,17 +150,24 @@ async fn cmd_update() -> Result<(), String> {
         ));
     }
 
-    println!("  Checking for updates...");
+    // Suppress the subprocess installer's chatter (downloading, paths,
+    // "everything's installed!"). The CLI prints its own clean status.
+    updater.disable_installer_output();
 
-    match updater.run().await {
+    print!("  Updating…");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+
+    let result = updater.run().await;
+    println!();
+
+    match result {
         Ok(Some(result)) => {
-            println!();
             println!("  \u{2714} Updated dodev to v{}", result.new_version);
             println!();
             Ok(())
         }
         Ok(None) => {
-            println!();
             println!("  \u{2714} Already on the latest release.");
             println!();
             Ok(())

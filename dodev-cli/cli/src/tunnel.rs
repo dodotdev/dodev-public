@@ -83,6 +83,40 @@ enum Envelope {
         #[serde(default)]
         ts: u64,
     },
+    // WebSocket-proxy envelopes. When a browser opens ws://<sub>.local.dev/<path>,
+    // the Worker accepts the upgrade and sends ws-open down the CLI tunnel.
+    // The CLI then dials ws://localhost:<port><path>, ack's, and shuttles
+    // frames in both directions until either side closes.
+    #[serde(rename = "ws-open")]
+    WsOpen {
+        id: String,
+        url: String, // path + query
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        #[serde(default)]
+        protocols: Vec<String>,
+    },
+    #[serde(rename = "ws-open-ack")]
+    WsOpenAck {
+        id: String,
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    #[serde(rename = "ws-msg")]
+    WsMsg {
+        id: String,
+        kind: String, // "text" | "binary"
+        data: String, // raw text or base64 for binary
+    },
+    #[serde(rename = "ws-close")]
+    WsClose {
+        id: String,
+        #[serde(default)]
+        code: Option<u16>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
 }
 
 pub async fn run_tunnel(config: TunnelConfig) -> Result<(), TunnelError> {
@@ -182,6 +216,13 @@ async fn connect_and_run(
 
     let local_port = config.local_port;
 
+    // ws-proxy session table. Each entry is the inbound side of a local
+    // ws://localhost dial — the read loop pushes ws-msg / ws-close
+    // envelopes here and a per-session task forwards them to the local WS.
+    // Removed when the local WS closes (either side).
+    let ws_sessions: std::sync::Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<WsLocalEvent>>>>
+        = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+
     // Server sends a heartbeat every ~25s. If we haven't seen ANY frame
     // (heartbeat, request, ack) in 70s we treat the connection as dead
     // and reconnect. This covers the silent-TCP-death case — NAT timeout
@@ -225,9 +266,6 @@ async fn connect_and_run(
                         continue;
                     }
                     Envelope::Heartbeat { ts } => {
-                        // Send ack back. The act of doing so refreshes
-                        // the server's lastSeenAt for this WS and keeps
-                        // it from getting pruned as idle.
                         let ack = Envelope::HeartbeatAck { ts };
                         if let Ok(payload) = serde_json::to_string(&ack) {
                             let _ = tx.send(Message::Text(payload.into())).await;
@@ -235,9 +273,47 @@ async fn connect_and_run(
                         continue;
                     }
                     Envelope::HeartbeatAck { .. } => {
-                        // We don't initiate heartbeats client-side, so
-                        // this shouldn't fire — but ignore cleanly if
-                        // it does.
+                        continue;
+                    }
+                    Envelope::WsOpen { id, url, headers, protocols } => {
+                        let local_host_arc = Arc::clone(local_host);
+                        let tx_clone = tx.clone();
+                        let sessions_clone = std::sync::Arc::clone(&ws_sessions);
+                        tokio::spawn(async move {
+                            handle_ws_open(
+                                id,
+                                url,
+                                headers,
+                                protocols,
+                                local_host_arc,
+                                local_port,
+                                tx_clone,
+                                sessions_clone,
+                            )
+                            .await;
+                        });
+                        continue;
+                    }
+                    Envelope::WsMsg { id, kind, data } => {
+                        let sender_opt = {
+                            ws_sessions.lock().unwrap().get(&id).cloned()
+                        };
+                        if let Some(sender) = sender_opt {
+                            let _ = sender.send(WsLocalEvent::Msg { kind, data }).await;
+                        }
+                        continue;
+                    }
+                    Envelope::WsClose { id, code, reason } => {
+                        let sender_opt = {
+                            ws_sessions.lock().unwrap().remove(&id)
+                        };
+                        if let Some(sender) = sender_opt {
+                            let _ = sender.send(WsLocalEvent::Close { code, reason }).await;
+                        }
+                        continue;
+                    }
+                    Envelope::WsOpenAck { .. } => {
+                        tracing::debug!("ignoring ws-open-ack from server");
                         continue;
                     }
                 };
@@ -306,6 +382,188 @@ async fn handle_request(
     if let Ok(payload) = serde_json::to_string(&envelope) {
         let _ = tx.send(Message::Text(payload.into())).await;
     }
+}
+
+// Events delivered to a per-session local-WS task from the main read loop.
+#[derive(Debug)]
+enum WsLocalEvent {
+    Msg { kind: String, data: String },
+    Close { code: Option<u16>, reason: Option<String> },
+}
+
+/// Browser opened a WebSocket through the tunnel. Dial the matching
+/// ws://localhost:<port><url>, send ws-open-ack, then shuttle frames
+/// in both directions until either side closes.
+#[allow(clippy::too_many_arguments)]
+async fn handle_ws_open(
+    id: String,
+    url: String,
+    headers: HashMap<String, String>,
+    protocols: Vec<String>,
+    local_host: Arc<String>,
+    local_port: u16,
+    tx: mpsc::Sender<Message>,
+    sessions: std::sync::Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<WsLocalEvent>>>>,
+) {
+    let ws_url = format!("ws://{}:{}{}", local_host, local_port, url);
+    let mut request = match ws_url.as_str().into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = send_envelope(
+                &tx,
+                &Envelope::WsOpenAck {
+                    id: id.clone(),
+                    ok: false,
+                    error: Some(format!("invalid local ws url: {}", e)),
+                },
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Forward selected headers from the browser request. The Host header
+    // is set to localhost:port automatically by tungstenite. Skip
+    // hop-by-hop headers and anything related to the upstream upgrade.
+    let req_headers = request.headers_mut();
+    for (k, v) in &headers {
+        let kl = k.to_lowercase();
+        if matches!(
+            kl.as_str(),
+            "host"
+                | "connection"
+                | "upgrade"
+                | "sec-websocket-key"
+                | "sec-websocket-version"
+                | "sec-websocket-accept"
+                | "sec-websocket-protocol"
+                | "sec-websocket-extensions"
+                | "content-length"
+        ) {
+            continue;
+        }
+        if let (Ok(name), Ok(val)) = (
+            tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(k.as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
+            req_headers.insert(name, val);
+        }
+    }
+    if !protocols.is_empty() {
+        if let Ok(val) = HeaderValue::from_str(&protocols.join(", ")) {
+            req_headers.insert("Sec-WebSocket-Protocol", val);
+        }
+    }
+
+    let (local_ws, _resp) = match tokio_tungstenite::connect_async(request).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!("ws-proxy: dial {} failed: {}", ws_url, e);
+            let _ = send_envelope(
+                &tx,
+                &Envelope::WsOpenAck {
+                    id: id.clone(),
+                    ok: false,
+                    error: Some(format!("local dial failed: {}", e)),
+                },
+            )
+            .await;
+            return;
+        }
+    };
+
+    let _ = send_envelope(&tx, &Envelope::WsOpenAck { id: id.clone(), ok: true, error: None }).await;
+
+    let (mut local_write, mut local_read) = local_ws.split();
+    let (local_event_tx, mut local_event_rx) = mpsc::channel::<WsLocalEvent>(256);
+    sessions.lock().unwrap().insert(id.clone(), local_event_tx);
+
+    // Inbound from upstream (browser via worker) → write to local WS.
+    let id_for_write = id.clone();
+    let local_write_task = tokio::spawn(async move {
+        while let Some(ev) = local_event_rx.recv().await {
+            match ev {
+                WsLocalEvent::Msg { kind, data } => {
+                    let frame = if kind == "binary" {
+                        match BASE64.decode(&data) {
+                            Ok(bytes) => Message::Binary(bytes.into()),
+                            Err(_) => continue,
+                        }
+                    } else {
+                        Message::Text(data.into())
+                    };
+                    if local_write.send(frame).await.is_err() {
+                        break;
+                    }
+                }
+                WsLocalEvent::Close { code, reason } => {
+                    let cf = tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(code.unwrap_or(1000)),
+                        reason: reason.unwrap_or_default().into(),
+                    };
+                    let _ = local_write.send(Message::Close(Some(cf))).await;
+                    break;
+                }
+            }
+        }
+        tracing::debug!("ws-proxy: local writer done for session {}", id_for_write);
+    });
+
+    // Outbound from local WS → wrap as ws-msg envelopes.
+    while let Some(msg) = local_read.next().await {
+        let msg = match msg {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::debug!("ws-proxy: local read err: {}", e);
+                break;
+            }
+        };
+        match msg {
+            Message::Text(text) => {
+                let _ = send_envelope(
+                    &tx,
+                    &Envelope::WsMsg {
+                        id: id.clone(),
+                        kind: "text".into(),
+                        data: text.to_string(),
+                    },
+                )
+                .await;
+            }
+            Message::Binary(bin) => {
+                let _ = send_envelope(
+                    &tx,
+                    &Envelope::WsMsg {
+                        id: id.clone(),
+                        kind: "binary".into(),
+                        data: BASE64.encode(&bin),
+                    },
+                )
+                .await;
+            }
+            Message::Close(cf) => {
+                let (code, reason) = cf
+                    .map(|c| (Some(u16::from(c.code)), Some(c.reason.to_string())))
+                    .unwrap_or((None, None));
+                let _ = send_envelope(
+                    &tx,
+                    &Envelope::WsClose { id: id.clone(), code, reason },
+                )
+                .await;
+                break;
+            }
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+        }
+    }
+
+    sessions.lock().unwrap().remove(&id);
+    let _ = local_write_task.await;
+    tracing::debug!("ws-proxy: session {} ended", id);
+}
+
+async fn send_envelope(tx: &mpsc::Sender<Message>, env: &Envelope) -> Result<(), ()> {
+    let payload = serde_json::to_string(env).map_err(|_| ())?;
+    tx.send(Message::Text(payload.into())).await.map_err(|_| ())
 }
 
 // Map a tungstenite connect error to AuthFailed when the server returned 401,

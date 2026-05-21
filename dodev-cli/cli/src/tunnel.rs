@@ -183,6 +183,18 @@ async fn connect_and_run(
         HeaderValue::from_str(&format!("Bearer {}", config.token))
             .map_err(|e| TunnelError::AuthFailed(format!("invalid token: {}", e)))?,
     );
+    // Advertise that this CLI understands the ws-* envelope set so the
+    // Worker is safe to proxy browser WebSockets to us. Old CLIs that
+    // don't send this header get the 404-on-upgrade fallback instead of
+    // a flood of "malformed envelope" warnings.
+    request.headers_mut().insert(
+        "x-dodev-supports-ws-proxy",
+        HeaderValue::from_static("1"),
+    );
+    request.headers_mut().insert(
+        "x-dodev-cli-version",
+        HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+    );
 
     tracing::info!("Connecting to {}", config.ws_url);
     let (ws, response) = tokio_tungstenite::connect_async(request)

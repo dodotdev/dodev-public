@@ -233,17 +233,23 @@ async fn cmd_start(
                 .map(|s| s.to_string())
                 .unwrap_or(requested);
 
-            // Accept either a flat owned subdomain ("dev") or a single-level
-            // nested form under an owned namespace ("talk.dev" or "pbx.dev").
-            // The Worker keys each nested hostname to its own Durable Object,
-            // so different leaves can run on different ports from different
-            // CLI processes — exactly the higher-plan upsell pitch.
+            // Walk the labels right-to-left; we own the hostname if any
+            // suffix is in our reserved/assigned list. Examples (assume
+            // "dev" and "pbx.dev" both claimed):
+            //   "dev"               → owns "dev"           (exact)
+            //   "talk.dev"          → owns "dev"           (suffix)
+            //   "api.pbx.dev"       → owns "pbx.dev"       (longest suffix)
+            //   "foo.bar.baz.dev"   → owns "dev"           (suffix)
+            //   "random-noun-123"   → owns "random-noun-123" (free flat)
             let parts: Vec<&str> = requested.split('.').collect();
-            let owns_it = match parts.as_slice() {
-                [single] => owned.iter().any(|s| s.eq_ignore_ascii_case(single)),
-                [_leaf, namespace] => owned.iter().any(|s| s.eq_ignore_ascii_case(namespace)),
-                _ => false, // 3+ levels deep — Worker rejects, fail fast here too
-            };
+            let mut owns_it = false;
+            for i in 0..parts.len() {
+                let suffix = parts[i..].join(".");
+                if owned.iter().any(|s| s.eq_ignore_ascii_case(&suffix)) {
+                    owns_it = true;
+                    break;
+                }
+            }
             if !owns_it {
                 return Err(format!(
                     "You don't own '{}.local.dev'. Subdomains you can use:\n{}\n\nFor nested subdomains, claim a namespace at https://local.dev/dashboard/subdomains then run `dodev local http <port> -s <leaf>.<namespace>` — e.g. `talk.dev`, `pbx.dev`.",

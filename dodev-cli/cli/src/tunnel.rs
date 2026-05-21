@@ -181,8 +181,32 @@ async fn connect_and_run(
     });
 
     let local_port = config.local_port;
-    while let Some(msg) = ws_read.next().await {
-        let msg = msg.map_err(|e| TunnelError::WebSocket(e.to_string()))?;
+
+    // Server sends a heartbeat every ~25s. If we haven't seen ANY frame
+    // (heartbeat, request, ack) in 70s we treat the connection as dead
+    // and reconnect. This covers the silent-TCP-death case — NAT timeout
+    // or middlebox dropping the flow without sending FIN, where ws_read
+    // just hangs forever otherwise and the CLI displays "connected" while
+    // proxied requests get "tunnel offline" on the server side.
+    const SERVER_SILENCE_TIMEOUT: Duration = Duration::from_secs(70);
+
+    loop {
+        let next = tokio::time::timeout(SERVER_SILENCE_TIMEOUT, ws_read.next()).await;
+        let msg = match next {
+            Err(_) => {
+                tracing::warn!(
+                    "No frame from server in {}s — treating as dead and reconnecting",
+                    SERVER_SILENCE_TIMEOUT.as_secs()
+                );
+                return Err(TunnelError::WebSocket(format!(
+                    "no server heartbeat in {}s",
+                    SERVER_SILENCE_TIMEOUT.as_secs()
+                )));
+            }
+            Ok(None) => break, // stream ended cleanly
+            Ok(Some(m)) => m.map_err(|e| TunnelError::WebSocket(e.to_string()))?,
+        };
+
         match msg {
             Message::Text(text) => {
                 let envelope: Envelope = match serde_json::from_str(&text) {

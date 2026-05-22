@@ -151,7 +151,17 @@ pub async fn run_tunnel(config: TunnelConfig) -> Result<(), TunnelError> {
                     ));
                     return Err(TunnelError::MaxReconnectsExceeded(MAX_RECONNECT_ATTEMPTS));
                 }
-                tracing::warn!("Tunnel disconnected: {}. Reconnecting...", e);
+                // First few reconnects are normal — NAT timeouts, edge
+                // rotations, brief Wi-Fi drops. Only escalate to WARN
+                // once we've retried a handful of times in a row.
+                if reconnect_attempt <= 3 {
+                    tracing::info!("Tunnel disconnected: {}. Reconnecting...", e);
+                } else {
+                    tracing::warn!(
+                        "Tunnel disconnected ({}/{}): {}. Reconnecting...",
+                        reconnect_attempt, MAX_RECONNECT_ATTEMPTS, e
+                    );
+                }
                 display::print_reconnecting(reconnect_attempt, MAX_RECONNECT_ATTEMPTS);
                 let base_secs = std::cmp::min(1u64 << (reconnect_attempt - 1), 30);
                 let jitter_ms = std::time::SystemTime::now()
@@ -509,8 +519,22 @@ async fn handle_ws_open(
                     }
                 }
                 WsLocalEvent::Close { code, reason } => {
+                    // Sanitize the close code before writing it to the
+                    // local WS. RFC 6455 forbids 1005/1006/1015 in a
+                    // Close frame — they're abnormal-closure markers
+                    // generated internally by WS stacks, never sent.
+                    // The Node `ws` library inside Next.js dev throws
+                    // `WS_ERR_INVALID_CLOSE_CODE` when one of these
+                    // arrives, polluting the dev server log with
+                    // uncaughtException stack traces. Map to 1011.
+                    let safe_code = match code {
+                        Some(c) if c == 1005 || c == 1006 || c == 1015 => 1011,
+                        Some(c) if (1000..=1014).contains(&c) && c != 1004 => c,
+                        Some(c) if (3000..=4999).contains(&c) => c,
+                        _ => 1011,
+                    };
                     let cf = tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(code.unwrap_or(1000)),
+                        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(safe_code),
                         reason: reason.unwrap_or_default().into(),
                     };
                     let _ = local_write.send(Message::Close(Some(cf))).await;

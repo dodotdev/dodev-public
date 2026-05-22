@@ -68,8 +68,12 @@ pub fn print_reconnecting(attempt: u32, max: u32) {
 
 /// One-line "back online" notice for routine reconnects. Used instead
 /// of repeating the full Tunnel-active banner on every NAT timeout.
+/// Says "refreshed" rather than "reconnected" because the latter
+/// implies something went wrong — these are routine maintenance
+/// recoveries, indistinguishable from a fresh tunnel from the user's
+/// perspective.
 pub fn print_reconnected_quietly() {
-    println!("  {}", "↻ tunnel reconnected".dimmed());
+    println!("  {}", "↻ tunnel refreshed".dimmed());
 }
 
 /// Print an error message.

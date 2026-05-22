@@ -331,9 +331,6 @@ async fn cmd_start(
 
 #[derive(serde::Deserialize)]
 struct MeResponse {
-    #[allow(dead_code)]
-    #[serde(default)]
-    email: Option<String>,
     #[serde(default, rename = "assignedSubdomains")]
     assigned_subdomains: Vec<String>,
     #[serde(default, rename = "reservedSubdomains")]
@@ -641,22 +638,3 @@ fn cmd_config(ws_url_override: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-// Legacy: defaults.relay_url in the config file is no longer consulted —
-// v1 derives the WS URL from --subdomain. The field is left in
-// DefaultsConfig so we don't break parsing of older config files.
-#[allow(dead_code)]
-fn _resolve_relay_url_legacy(cli_value: &str) -> String {
-    let default = "wss://relay.local.dev/ws/connect";
-    if cli_value == default {
-        if let Some(cfg) = config::load_config() {
-            if let Some(defaults) = cfg.defaults {
-                if let Some(url) = defaults.relay_url {
-                    if !url.is_empty() {
-                        return url;
-                    }
-                }
-            }
-        }
-    }
-    cli_value.to_string()
-}

@@ -22,7 +22,6 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest, http::HeaderValue, Message,
 };
-use uuid::Uuid;
 
 use crate::display;
 use crate::proxy::{self, LocalRequest};
@@ -659,10 +658,3 @@ fn classify_connect_error(err: tokio_tungstenite::tungstenite::Error) -> TunnelE
     TunnelError::WebSocket(err.to_string())
 }
 
-// Silence "unused import" if we ever stop generating UUIDs client-side; today
-// the DO assigns ids so we don't need this, but keep it imported for future
-// inverse-call shapes (e.g. CLI-initiated probes).
-#[allow(dead_code)]
-fn _client_id() -> String {
-    Uuid::new_v4().to_string()
-}

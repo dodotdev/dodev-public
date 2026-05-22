@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     pub auth: Option<AuthConfig>,
-    pub defaults: Option<DefaultsConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -23,11 +22,6 @@ pub struct AuthConfig {
     pub email: Option<String>,
     /// User display name
     pub name: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct DefaultsConfig {
-    pub relay_url: Option<String>,
 }
 
 /// Session info returned from the config file.
@@ -65,7 +59,7 @@ pub fn load_config() -> Option<AppConfig> {
 
 /// Save a session token and user info to the config file.
 ///
-/// Preserves existing config values (e.g. `defaults.relay_url`, `auth.api_key`).
+/// Preserves existing config values (e.g. `auth.api_key`).
 pub fn save_session(
     token: &str,
     user_id: &str,
@@ -107,7 +101,7 @@ pub fn load_session() -> Option<SessionInfo> {
 
 /// Remove all session fields from the config file.
 ///
-/// Preserves other config values (e.g. `defaults.relay_url`, `auth.api_key`).
+/// Preserves other config values (e.g. `auth.api_key`).
 pub fn clear_session() -> Result<(), ConfigError> {
     let path = config_path().ok_or(ConfigError::NoConfigDir)?;
 
@@ -123,22 +117,6 @@ pub fn clear_session() -> Result<(), ConfigError> {
         auth.email = None;
         auth.name = None;
     }
-
-    write_config(&path, &config)
-}
-
-/// Save an API key to the config file.
-///
-/// Preserves existing config values (e.g. `defaults.relay_url`).
-pub fn save_api_key(key: &str) -> Result<(), ConfigError> {
-    let path = config_path().ok_or(ConfigError::NoConfigDir)?;
-
-    // Load existing config or create a new one
-    let mut config = load_config().unwrap_or_default();
-
-    // Update the auth section
-    let auth = config.auth.get_or_insert_with(AuthConfig::default);
-    auth.api_key = Some(key.to_string());
 
     write_config(&path, &config)
 }

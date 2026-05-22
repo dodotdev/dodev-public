@@ -53,8 +53,3 @@ pub fn get_auth_token() -> Result<String, AuthError> {
 
     Err(AuthError::NotFound)
 }
-
-/// Legacy alias for backwards compatibility in internal callers.
-pub fn get_api_key() -> Result<String, AuthError> {
-    get_auth_token()
-}

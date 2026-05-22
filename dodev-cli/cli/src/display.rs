@@ -50,14 +50,26 @@ pub fn print_request_log(method: &str, path: &str, status: u16, duration_ms: u64
     );
 }
 
-/// Print a reconnection attempt message.
+/// Print a reconnection attempt message. Attempts 1-2 are silent — NAT
+/// timeouts and Wi-Fi flickers are routine and the auto-recovery
+/// usually completes in a second. We only narrate from attempt 3 on,
+/// when something more persistent is wrong.
 pub fn print_reconnecting(attempt: u32, max: u32) {
+    if attempt < 3 {
+        return;
+    }
     println!(
         "  {} Reconnecting... (attempt {}/{})",
         "⟳".yellow().bold(),
         attempt,
         max
     );
+}
+
+/// One-line "back online" notice for routine reconnects. Used instead
+/// of repeating the full Tunnel-active banner on every NAT timeout.
+pub fn print_reconnected_quietly() {
+    println!("  {}", "↻ tunnel reconnected".dimmed());
 }
 
 /// Print an error message.

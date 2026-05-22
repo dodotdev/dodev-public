@@ -207,6 +207,11 @@ async fn connect_and_run(
     );
 
     tracing::info!("Connecting to {}", config.ws_url);
+    // Snapshot before we reset — lets us decide whether this connect
+    // is the initial one (print full banner), a quiet recovery (print
+    // a single dim line), or a recovery from sustained trouble (print
+    // the full banner so the user knows we're back).
+    let prior_attempt = *reconnect_attempt;
     let (ws, response) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(|e| classify_connect_error(e))?;
@@ -221,7 +226,16 @@ async fn connect_and_run(
     // Connection succeeded — reset the consecutive-failure counter so a later
     // drop starts fresh backoff rather than accumulating toward the cap.
     *reconnect_attempt = 0;
-    display::print_tunnel_active(&config.subdomain, config.local_port, "local.dev");
+    if prior_attempt == 0 {
+        display::print_tunnel_active(&config.subdomain, config.local_port, "local.dev");
+    } else if prior_attempt < 3 {
+        // Routine reconnect — one quiet line, no banner spam.
+        display::print_reconnected_quietly();
+    } else {
+        // We escalated to WARN earlier; user deserves the full banner
+        // back so they can confirm the tunnel is really up.
+        display::print_tunnel_active(&config.subdomain, config.local_port, "local.dev");
+    }
 
     let (mut ws_write, mut ws_read) = ws.split();
     let (tx, mut rx) = mpsc::channel::<Message>(256);
